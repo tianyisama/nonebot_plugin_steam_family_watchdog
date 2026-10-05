@@ -2,17 +2,23 @@
 
 监控 Steam 家庭库变化，将新增游戏或新增拥有者推送至 QQ 群和个人的 **NoneBot2 / OneBot v11 插件**。
 
-支持一次命令启用后自动恢复、独立目标确认进度、长期凭据失效通知，以及轻量 Web 管理页面。首次扫描建立静默基线，不把整个游戏库当作新增推送。
+自动刷新steam凭证、无需维护；支持独立目标确认进度、长期凭据失效通知，以及轻量 Web 管理页面。
 
-后端运行在 Bot 的事件循环中，由 NoneBot 启动 hook 装配、APScheduler 调度。Steam 认证和监控核心已包含在仓库的 `steam_family_watchdog_core` 包内，不依赖本地其他项目，不需要 Node.js、Steam API Key 或外部数据库。
+## 需要什么
 
-需要 Python 3.11+、NoneBot2 2.5+、OneBot v11、Steam 家庭账号。已验证 NoneBot2 2.5.0 / OneBot Adapter 2.4.6 / APScheduler Plugin 0.5.0 / Python 3.14。
+Python 3.11+、NoneBot2 2.5+、OneBot v11、Steam 家庭账号。
 
 ## 安装和加载
 
-在 **Bot 使用的 Python 环境**中安装。当前使用源码安装方式：
+一、一键安装(推荐):
 
-```powershell
+```bash
+nb plugin install nonebot-plugin-steam-family-watchdog
+```
+
+二、使用源码在 **Bot 使用的 Python 环境**中安装。
+
+```bash
 git clone https://github.com/tianyisama/nonebot_plugin_steam_family_watchdog.git
 cd nonebot_plugin_steam_family_watchdog
 python -m pip install .
@@ -24,7 +30,6 @@ python -m pip install .
 python -m pip install "git+https://github.com/tianyisama/nonebot_plugin_steam_family_watchdog.git"
 ```
 
-需要修改源码时，在仓库内使用 `python -m pip install -e .`。安装会一并安装 NoneBot、OneBot v11、APScheduler、Pydantic、aiohttp、protobuf 等依赖；监控核心与登录页面已包含在同一个安装包中。目前不要求从 PyPI 安装任何同名监控核心包。
 
 在现有 NoneBot 入口中，完成 `nonebot.init()` 和 OneBot v11 Adapter 注册后加载：
 
@@ -32,9 +37,8 @@ python -m pip install "git+https://github.com/tianyisama/nonebot_plugin_steam_fa
 nonebot.load_plugin("nonebot_plugin_steam_family_watchdog")
 ```
 
-使用 `nb run` 的项目，也可在项目 `pyproject.toml` 的 `[tool.nonebot]` 中把 `nonebot_plugin_steam_family_watchdog` 加入 `plugins`。APScheduler 由插件入口通过 `require()` 加载，无需手动再加载一次。
+使用 `nb run` 的项目，也可在项目 `pyproject.toml` 的 `[tool.nonebot]` 中把 `nonebot_plugin_steam_family_watchdog` 加入 `plugins`。
 
-`__init__.py` 是 NoneBot 插件入口，应由 NoneBot 加载；无需另外启动独立后端，也不直接执行该文件。建议使用 pip 安装，不要只复制插件目录而遗漏内置监控核心。
 
 ## 配置
 
@@ -53,7 +57,7 @@ STEAM_FAMILY_WEB_HOST="0.0.0.0"
 STEAM_FAMILY_WEB_PORT=11454
 ```
 
-群聊、个人均为 **list**，可以任意一项为空，但启用时不能同时为空。支持数字或数字字符串，会去重并规范化。数据目录相对 **Bot 的工作目录**解析。
+群聊、个人均为 **list**，可以任意一项为空，但启用时不能同时为空。支持数字或数字字符串。数据目录相对 **Bot 的工作目录**解析。
 
 | 配置名（`STEAM_FAMILY_` 前缀） | 默认值 | 用途 |
 |---|---|---|
@@ -75,17 +79,16 @@ STEAM_FAMILY_WEB_PORT=11454
 | `WEB_PORT` | `11454` | 管理服务端口 |
 | `WEB_TOKEN` | 空 | 至少 32 字符；留空自动生成本地密钥文件 |
 
-`SUPERUSERS` 使用 NoneBot 自带配置。本插件支持普通 QQ 字符串以及 `OneBot V11:QQ号` 格式；其他适配器的超级用户不会收到 QQ 私聊。
 
-NoneBot 的 dotenv 配置在启动时读取。Web 修改保存在 `DATA_DIR/plugin-config.json`，并在以后启动时覆盖对应 dotenv 设置；页面保存的是完整可编辑配置。希望重新以 `.env` 为准时，停止 Bot 后备份并删除 `plugin-config.json`。
+NoneBot 的 dotenv 配置在启动时读取。Web 修改保存在 `DATA_DIR/plugin-config.json`，并在以后启动时覆盖对应 dotenv 设置；页面保存的是完整可编辑配置。若希望以 `.env` 为准，停止 Bot 后删除 `plugin-config.json`即可。
 
-Web 监听地址、端口、数据目录、管理密钥属于启动配置，修改 `.env` 后重启。推送目标、轮询参数、语言、别名和图片选项可在页面中即时修改。
+Web 监听地址、端口、数据目录、管理密钥属于启动配置，修改 `.env` 后需要重启应用。推送目标、轮询参数、语言、别名和图片选项可在页面中实时修改。
 
 ## Steam 登录
 
 插件读取 `DATA_DIR/auth.json`。在 **Bot 的工作目录**执行下列命令，直接将凭据保存到默认插件数据目录：
 
-```powershell
+```bash
 python -m steam_family_watchdog_core setup --root ./steam-login
 python -m steam_family_watchdog_core login --root ./steam-login --data-dir ./data/steam_family_watchdog
 ```
@@ -94,17 +97,17 @@ python -m steam_family_watchdog_core login --root ./steam-login --data-dir ./dat
 
 扫码登录可替换第二条命令为：
 
-```powershell
+```bash
 python -m steam_family_watchdog_core login-qr --root ./steam-login --data-dir ./data/steam_family_watchdog
 ```
 
-如果修改了 `STEAM_FAMILY_DATA_DIR`，请把 `--data-dir` 改成相同路径。登录程序与运行中的监控不能同时使用该数据目录，重新登录前先发送 `/steam停止`。
+如果修改了 `STEAM_FAMILY_DATA_DIR`，请把 `--data-dir` 改成相同路径。登录程序与运行中的监控不能同时使用该数据目录，重新登录前需先发送 `/steam停止`。
 
-`steam-login` 仅保存登录工具自身的配置和随机接口密钥，其 `MONITOR_API_SECRET` 不用于插件 Web 管理。插件无需启动登录工具的独立数据 HTTP 服务。
+`steam-login` 仅保存登录工具自身的配置和随机接口密钥，其 `MONITOR_API_SECRET` 不用于插件 Web 管理。
 
 如已有 JS / Python 版 `steam-family-watchdog` 数据，停止原监控后，可将整个 `data` 目录复制到插件数据目录，或直接设置 `STEAM_FAMILY_DATA_DIR` 为其绝对路径。`auth.json` 和 SQLite 表结构保持兼容，原有事件及 HTTP 客户端进度不会重置。新的 QQ 目标是否补取历史由 `REPLAY_HISTORY` 决定。
 
-`--root` 指定工具配置目录，`--data-dir` 指定实际凭据 / 数据目录（相对于当前工作目录解析）。两者不是同一个选项。更新源码或重新登录时保留整个插件数据目录，尤其是数据库、客户端进度及插件状态。
+`--root` 指定工具配置目录，`--data-dir` 指定实际凭据 / 数据目录（相对于当前工作目录解析）。
 
 ## 首次启用、自动恢复和命令
 
@@ -115,7 +118,7 @@ python -m steam_family_watchdog_core login-qr --root ./steam-login --data-dir ./
 /steam启动
 ```
 
-命令前缀遵循 Bot 的 `COMMAND_START` 配置；如果你的 Bot 允许无前缀，也可直接发送 `steam启动`。
+命令前缀遵循 Bot 的 `COMMAND_START` 配置；如果 Bot 允许无前缀，也可直接发送 `steam启动`。
 
 `steam启动` 会检查本地配置、至少一个推送目标、SUPERUSERS、Bot 连接 / ID 和长期凭据格式及到期时间。通过后保存首次启用标记与启用状态，后端由 APScheduler 开始扫描。
 
@@ -236,7 +239,7 @@ git pull
 python -m pip install --upgrade .
 ```
 
-随后重新启动 Bot。保留插件数据目录、Bot 的 `.env` 和登录配置；这些运行文件不应上传到仓库。
+随后重新启动 Bot。
 
 ## 来源与许可证
 
