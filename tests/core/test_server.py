@@ -30,7 +30,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue((target / "monitor.lock").exists())
             with patch("steam_family_watchdog_core.__main__.serve", fake_serve):
                 await _run(SimpleNamespace(command="start", root=settings, data_dir=target))
-            self.assertEqual(received, [target])
+            self.assertEqual(received, [target.resolve()])
             self.assertFalse((target / "monitor.lock").exists())
 
     async def test_assembled_service_health_missing_login_and_graceful_exit(self):

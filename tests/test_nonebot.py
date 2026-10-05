@@ -8,6 +8,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from apscheduler.events import EVENT_JOB_EXECUTED
 
 import nonebot
 import nonebot_plugin_steam_family_watchdog as plugin
@@ -44,22 +45,28 @@ class NoneBotTests(unittest.IsolatedAsyncioTestCase):
                               auth_factory=FakeAuth, api_factory=api.factory)
             web = WebManager(service, lambda _: None)
             with patch.object(plugin, "service", service), patch.object(plugin, "web_manager", web):
-                async with nonebot.get_driver()._lifespan:
-                    self.assertTrue(service.started)
-                    self.assertIsNone(service.monitor)
-                    self.assertIsNotNone(plugin.scheduler.get_job(plugin.JOB_ID))
-                    self.assertTrue((await service.enable(bot, from_command=True))["ok"])
-                    plugin.scheduler.start()
-                    async with asyncio.timeout(3):
-                        while not service.store.ready():
-                            await asyncio.sleep(0.01)
-                    api.apps.append(game(20))
-                    service.next_scan = 0
-                    plugin.scheduler.modify_job(plugin.JOB_ID, next_run_time=datetime.now(timezone.utc))
-                    async with asyncio.timeout(3):
-                        while not bot.sent:
-                            await asyncio.sleep(0.01)
-                    self.assertEqual(bot.sent[0][:2], ("group", "100"))
+                completed = asyncio.Event()
+                def job_completed(event):
+                    if event.job_id == plugin.JOB_ID:
+                        completed.set()
+                plugin.scheduler.add_listener(job_completed, EVENT_JOB_EXECUTED)
+                try:
+                    async with nonebot.get_driver()._lifespan:
+                        self.assertTrue(service.started)
+                        self.assertIsNone(service.monitor)
+                        self.assertIsNotNone(plugin.scheduler.get_job(plugin.JOB_ID))
+                        self.assertTrue((await service.enable(bot, from_command=True))["ok"])
+                        plugin.scheduler.start()
+                        await asyncio.wait_for(completed.wait(), 10)
+                        self.assertTrue(service.store.ready())
+                        completed.clear()
+                        api.apps.append(game(20))
+                        service.next_scan = 0
+                        plugin.scheduler.modify_job(plugin.JOB_ID, next_run_time=datetime.now(timezone.utc))
+                        await asyncio.wait_for(completed.wait(), 10)
+                        self.assertEqual(bot.sent[0][:2], ("group", "100"))
+                finally:
+                    plugin.scheduler.remove_listener(job_completed)
                 await asyncio.sleep(0)
                 self.assertFalse(service.started)
                 self.assertFalse((root / "monitor.lock").exists())

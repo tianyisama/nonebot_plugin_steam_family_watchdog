@@ -19,7 +19,7 @@ class ConfigTests(unittest.TestCase):
             setup(root)
             self.assertEqual((root / ".env").read_text(), first)
             config = load_config(root)
-            self.assertEqual(config.data_dir, root / "data")
+            self.assertEqual(config.data_dir, (root / "data").resolve())
             self.assertEqual(len(config.api_secret), 64)
             self.assertEqual(config.poll_seconds, 300)
             atomic_json(root / "config.json", {"poll_seconds": 60})
