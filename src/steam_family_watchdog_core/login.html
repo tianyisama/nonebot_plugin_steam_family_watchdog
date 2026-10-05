@@ -1,0 +1,16 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Steam 家庭库登录</title>
+<style>body{font:16px system-ui,sans-serif;background:#111827;color:#e5e7eb;margin:0;padding:36px 16px}main{max-width:480px;margin:0 auto;background:#1f2937;border:1px solid #374151;border-radius:18px;padding:28px}h1{font-size:25px;margin-top:0}p{line-height:1.7;color:#bdc9da}label{display:block;margin:18px 0 8px}input,button{box-sizing:border-box;width:100%;padding:12px;font:inherit;border-radius:8px}input{background:#111827;color:white;border:1px solid #59677a}button{margin-top:20px;background:#38bdf8;color:#082f49;border:0;font-weight:600;cursor:pointer}button:disabled{opacity:.5}#status{white-space:pre-wrap;min-height:48px;color:#a5e7ff}small{color:#9ca3af}#guard{display:none}</style>
+<main><h1>登录 Steam 家庭库</h1><p>使用 Steam 账号密码，以及 Steam++（Watt Toolkit）中显示的动态验证码。此页面只在本机提供；密码与验证码不会保存。</p>
+<form id="account" autocomplete="off"><label for="name">Steam 登录账号</label><input id="name" autocomplete="username" required><label for="password">密码</label><input id="password" type="password" autocomplete="off" required><label for="firstcode">Steam++ 动态验证码（可选）</label><input id="firstcode" maxlength="8" autocomplete="off" placeholder="例如 ABCDE；也可以下一步输入"><button id="login">登录</button></form>
+<form id="guard" autocomplete="off"><label for="code">验证码</label><input id="code" maxlength="8" required autocomplete="one-time-code" placeholder="输入当前显示的验证码"><button id="submitcode">提交验证码</button></form>
+<p id="status"></p><small>验证码会定时变化，请及时提交。若 Steam 要求邮箱验证，请输入收到的邮箱验证码。</small></main>
+<script>
+const csrf=__CSRF_JSON__;
+const el=id=>document.getElementById(id);
+let finished=false;
+function render(s){el('status').textContent=s.message;el('guard').style.display=['awaiting_code','awaiting_confirmation'].includes(s.stage)?'block':'none';if(s.stage==='authenticated'){finished=true;el('account').style.display='none';el('guard').style.display='none';}}
+async function submit(route,data){el('login').disabled=true;el('submitcode').disabled=true;try{const r=await fetch(route,{method:'POST',headers:{'Content-Type':'application/json','X-Login-CSRF':csrf},body:JSON.stringify(data)});render(await r.json());}catch{el('status').textContent='本地登录服务未连接。若尚未成功，请重新启动登录程序。';}finally{el('password').value='';el('firstcode').value='';el('code').value='';el('login').disabled=false;el('submitcode').disabled=false;}}
+el('account').addEventListener('submit',e=>{e.preventDefault();submit('/login',{accountName:el('name').value,password:el('password').value,code:el('firstcode').value});});
+el('guard').addEventListener('submit',e=>{e.preventDefault();submit('/code',{code:el('code').value});});
+async function poll(){if(finished)return;try{const r=await fetch('/state',{headers:{'X-Login-CSRF':csrf}});render(await r.json());}catch{}setTimeout(poll,2000);}poll();
+</script></html>

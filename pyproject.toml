@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nonebot-plugin-steam-family-watchdog"
+version = "0.1.0"
+description = "Steam 家庭库变化推送、持久启用与轻量管理页面"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "nonebot2>=2.5,<3",
+    "nonebot-adapter-onebot>=2.4,<3",
+    "nonebot-plugin-apscheduler>=0.5,<1",
+    "pydantic>=2.7,<3",
+    "aiohttp>=3.10,<4",
+    "cryptography>=43",
+    "protobuf>=5,<8",
+    "qrcode[pil]>=8,<9",
+]
+
+[project.urls]
+Repository = "https://github.com/tianyisama/nonebot_plugin_steam_family_watchdog"
+Issues = "https://github.com/tianyisama/nonebot_plugin_steam_family_watchdog/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nonebot_plugin_steam_family_watchdog = ["web.html"]
+steam_family_watchdog_core = ["login.html", "LICENSE"]
