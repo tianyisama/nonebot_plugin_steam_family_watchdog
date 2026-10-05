@@ -166,6 +166,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.next_scan = 0
         await self.service.pulse()
         self.api.failure = None
+        await self.service.login_manager.close()
+        await self.service.authentication_finished()
         self.service.next_scan = 0
         await self.service.pulse()
         self.assertIsNone(self.service.state.auth_notice)
@@ -272,6 +274,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         (self.root / "auth.json").write_text(json.dumps({"platform": "MobileApp", "refresh_token": token(expiry=time.time() - 1)}))
         self.service.next_scan = 0
         await self.service.pulse()
-        self.assertEqual(self.service.monitor.status["last_error"]["code"], "AUTH_REQUIRED")
-        self.assertEqual(self.service.auth.state, "needs_login")
+        self.assertEqual(self.service.status()["last_error"]["code"], "AUTH_REQUIRED")
+        self.assertEqual(self.service.status()["auth_state"], "needs_login")
+        self.assertTrue(self.service.login_manager.active)
         self.assertEqual(self.bot.sent[0][:2], ("private", "999"))

@@ -29,7 +29,7 @@ class NoneBotTests(unittest.IsolatedAsyncioTestCase):
             return PrivateMessageEvent.model_validate({"time": 0, "self_id": 12345, "post_type": "message", "message_type": "private",
                 "sub_type": "friend", "user_id": user_id, "message_id": 1, "message": "/steam启动", "raw_message": "/steam启动",
                 "font": 0, "sender": {"user_id": user_id, "nickname": "test", "sex": "unknown", "age": 0}})
-        for matcher in (plugin.activate, plugin.deactivate, plugin.check_config, plugin.show_status):
+        for matcher in (plugin.activate, plugin.deactivate, plugin.check_config, plugin.show_status, plugin.show_config_page, plugin.show_login_page):
             self.assertTrue(await matcher.permission(bot, event(999)))
             self.assertFalse(await matcher.permission(bot, event(888)))
 
@@ -39,7 +39,7 @@ class NoneBotTests(unittest.IsolatedAsyncioTestCase):
             save_auth(root / "auth.json", token())
             bot, api = FakeBot(), FakeApi()
             config = Config(steam_family_data_dir=root, steam_family_push_groups=["100"],
-                steam_family_web_enabled=False, steam_family_jitter_seconds=0)
+                steam_family_web_enabled=False, steam_family_jitter_seconds=0, steam_family_auto_public_ip=False)
             service = Service(config, lambda: {bot.self_id: bot}, lambda: {"999"}, lambda _: None,
                               auth_factory=FakeAuth, api_factory=api.factory)
             web = WebManager(service, lambda _: None)

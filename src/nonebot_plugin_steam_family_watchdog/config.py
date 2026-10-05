@@ -2,6 +2,8 @@
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+from ipaddress import ip_address, ip_network
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -26,9 +28,18 @@ class Config(BaseModel):
     steam_family_web_host: str = "0.0.0.0"
     steam_family_web_port: int = Field(default=11454, ge=1, le=65535)
     steam_family_web_token: str = Field(default="", repr=False)
+    steam_family_web_public_url: str = ""
+    steam_family_login_host: str = "0.0.0.0"
+    steam_family_login_port: int = Field(default=11453, ge=1, le=65535)
+    steam_family_login_public_url: str = ""
+    steam_family_login_timeout_seconds: int = Field(default=600, ge=60, le=3600)
+    steam_family_login_trusted_proxies: list[str] = Field(default_factory=lambda: ["127.0.0.1", "::1"])
+    steam_family_auto_public_ip: bool = True
+    steam_family_public_ip: str = ""
 
     @field_validator("steam_family_poll_seconds", "steam_family_jitter_seconds", "steam_family_missing_confirmations",
-                     "steam_family_max_push_per_tick", "steam_family_push_retry_seconds", "steam_family_web_port", mode="before")
+                     "steam_family_max_push_per_tick", "steam_family_push_retry_seconds", "steam_family_web_port",
+                     "steam_family_login_port", "steam_family_login_timeout_seconds", mode="before")
     @classmethod
     def integer_only(cls, value):
         if isinstance(value, bool) or isinstance(value, float):
@@ -73,6 +84,38 @@ class Config(BaseModel):
         if value and (len(value) < 32 or value.startswith("replace-")):
             raise ValueError("管理密钥至少 32 字符；留空则自动生成")
         return value
+
+    @field_validator("steam_family_web_public_url", "steam_family_login_public_url")
+    @classmethod
+    def validate_public_url(cls, value):
+        if not value:
+            return ""
+        parsed = urlsplit(value)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment):
+            raise ValueError("公网地址必须为 HTTP/HTTPS URL，且不能包含账号、密码、查询参数或片段")
+        try:
+            parsed.port
+        except ValueError as error:
+            raise ValueError("公网地址端口无效") from error
+        return value.rstrip("/") + "/"
+
+    @field_validator("steam_family_public_ip")
+    @classmethod
+    def validate_ip(cls, value):
+        return str(ip_address(value)) if value else ""
+
+    @field_validator("steam_family_login_public_url")
+    @classmethod
+    def secure_login_url(cls, value):
+        if value and urlsplit(value).scheme != "https":
+            raise ValueError("非本地 Steam 认证地址必须使用 HTTPS")
+        return value
+
+    @field_validator("steam_family_login_trusted_proxies")
+    @classmethod
+    def trusted_proxies(cls, values):
+        return [str(ip_network(value, strict=False)) for value in values]
 
     @field_validator("steam_family_data_dir")
     @classmethod

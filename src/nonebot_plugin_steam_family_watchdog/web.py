@@ -1,8 +1,6 @@
 """仅依赖 aiohttp 的管理页面；公开页面不包含管理密钥。"""
 
 import hmac
-import os
-import secrets
 from importlib.resources import files
 from urllib.parse import urlsplit
 
@@ -14,6 +12,7 @@ from steam_family_watchdog_core.store import ApiError
 from steam_family_watchdog_core.util import json_text
 
 from .config import public_config
+from .access import management_token, address_message
 
 HEADERS = {
     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
@@ -28,21 +27,9 @@ class WebManager:
         self.runner = None
 
     def load_token(self):
-        if self.service.config.steam_family_web_token:
-            self.token = self.service.config.steam_family_web_token
-            return
-        file = self.service.root / "web-token.txt"
-        try:
-            fd = os.open(file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            pass
-        else:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                stream.write(secrets.token_hex(32) + "\n")
-        self.token = file.read_text(encoding="utf-8").strip()
-        if len(self.token) < 32 or self.token.startswith("replace-"):
-            raise ValueError("管理密钥文件无效")
-        self.log(f"Steam 管理页面密钥保存在 {file}；密钥不会出现在网页或 Bot 消息中。")
+        self.token = management_token(self.service)
+        if not self.service.config.steam_family_web_token:
+            self.log(f"Steam 管理页面密钥保存在 {self.service.root / 'web-token.txt'}；密钥不会出现在网页或 Bot 消息中。")
 
     def create_app(self):
         page = files(__package__).joinpath("web.html").read_text(encoding="utf-8")
@@ -67,12 +54,14 @@ class WebManager:
                 if request.method == "PATCH" and request.path == "/api/config":
                     config = await self.service.update_config(await body_json(request))
                     return send(200, {"ok": True, "config": config})
-                if request.method == "POST" and request.path in ("/api/check", "/api/stop", "/api/resume"):
+                if request.method == "POST" and request.path in ("/api/check", "/api/stop", "/api/resume", "/api/login"):
                     await body_json(request)
                     if request.path == "/api/check":
                         result = await self.service.check()
                     elif request.path == "/api/stop":
                         result = await self.service.disable()
+                    elif request.path == "/api/login":
+                        result = await self.service.request_login()
                     else:
                         result = await self.service.enable()
                     return send(200 if result["ok"] else 409, result)
@@ -101,13 +90,15 @@ class WebManager:
             self.runner = web.AppRunner(self.create_app(), access_log=None, shutdown_timeout=45)
             await self.runner.setup()
             await web.TCPSite(self.runner, config.steam_family_web_host, config.steam_family_web_port).start()
-            self.log(f"Steam 管理页面已启动：{config.steam_family_web_host}:{config.steam_family_web_port}")
+            self.service.web_running = True
+            self.log(address_message("Steam 配置页面已启动", self.service.urls("web")))
         except Exception:
             self.service.web_error = "管理页面未启动，请检查端口、目录权限或管理密钥配置。"
             self.log(self.service.web_error)
             await self.close()
 
     async def close(self):
+        self.service.web_running = False
         if self.runner:
             await self.runner.cleanup()
             self.runner = None

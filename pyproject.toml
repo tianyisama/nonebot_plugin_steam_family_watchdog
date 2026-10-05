@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nonebot-plugin-steam-family-watchdog"
-version = "0.1.0"
+version = "0.2.0"
 description = "Steam 家庭库变化推送、持久启用与轻量管理页面"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,4 +29,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 nonebot_plugin_steam_family_watchdog = ["web.html"]
-steam_family_watchdog_core = ["login.html", "LICENSE"]
+steam_family_watchdog_core = ["login.html", "login_access.html", "LICENSE"]

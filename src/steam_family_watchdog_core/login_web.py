@@ -6,6 +6,8 @@ import json
 import re
 import secrets
 import time
+from urllib.parse import urlsplit
+from ipaddress import ip_address, ip_network
 from importlib.resources import files
 
 from aiohttp import web
@@ -22,23 +24,31 @@ HEADERS = {
 
 
 class LoginWeb:
-    def __init__(self, config, port: int = 11453, session_factory=LoginSession, log=print):
+    def __init__(self, config, port: int = 11453, session_factory=LoginSession, log=print,
+                 access_token: str = "", allowed_origins: set[str] | None = None, lifetime: int = 600,
+                 trusted_proxies: list[str] | None = None):
         if type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("登录端口无效")
         self.config, self.port, self.session_factory, self.log = config, port, session_factory, log
         self.origin = f"http://127.0.0.1:{port}"
+        self.allowed_origins = allowed_origins or {self.origin}
+        self.allowed_hosts = {urlsplit(origin).netloc for origin in self.allowed_origins}
+        self.access_token = access_token
+        self.lifetime = lifetime
+        self.trusted_proxies = [ip_network(value, strict=False) for value in trusted_proxies or []]
         self.csrf = secrets.token_hex(32)
         self.session = None
         self.poll_task = None
         self.shutdown_task = None
         self.expiry_task = None
         self.stop_event = asyncio.Event()
+        self.authenticated_event = asyncio.Event()
         self.busy = False
         self.attempts = 0
         self.blocked_until = 0.0
         self.login_cooldown = 0.0
         self.state = {"stage": "idle", "message": "输入 Steam 账号和密码，再使用 Steam++ 的动态验证码完成验证。"}
-        self.page = files("steam_family_watchdog_core").joinpath("login.html").read_text(encoding="utf-8").replace("__CSRF_JSON__", json.dumps(self.csrf))
+        self.page = files("steam_family_watchdog_core").joinpath("login.html").read_text(encoding="utf-8").replace("__CSRF_JSON__", json.dumps(self.csrf)).replace("__ACCESS_TOKEN_JSON__", json.dumps(access_token))
 
     def public_error(self, error: Exception) -> str:
         code = getattr(error, "eresult", None)
@@ -67,6 +77,7 @@ class LoginWeb:
                         self.state = {"stage": "error", "message": "登录成功，但凭据保存失败，请检查本机目录权限。"}
                         return
                     self.state = {"stage": "authenticated", "message": "登录成功，凭据已保存。可以关闭此页面。"}
+                    self.authenticated_event.set()
                     self.log("Steam 登录成功；长期凭据已保存。")
                     self.shutdown_task = asyncio.create_task(self._stop_after(10))
                     return
@@ -90,12 +101,32 @@ class LoginWeb:
         def send(status, data):
             return web.json_response(data, status=status, headers=HEADERS, dumps=json_text)
 
-        if request.headers.get("Host") != f"127.0.0.1:{self.port}":
-            return send(403, {"message": "请使用本机 127.0.0.1 地址打开登录页面。"})
-        if request.method == "GET" and request.path_qs == "/":
+        try:
+            peer = ip_address(request.remote or "")
+            peer = peer.ipv4_mapped if peer.version == 6 and peer.ipv4_mapped else peer
+            trusted = any(peer in network for network in self.trusted_proxies)
+            loopback = peer.is_loopback
+        except ValueError:
+            trusted = loopback = False
+        forwarded_secure = trusted and request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        host = request.headers.get("X-Forwarded-Host", request.headers.get("Host", "")) if forwarded_secure else request.headers.get("Host", "")
+        forwarded = any(name in request.headers for name in ("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"))
+        local = loopback and not forwarded and host == f"127.0.0.1:{self.port}"
+        if not local and not (request.secure or forwarded_secure):
+            return send(403, {"message": "Steam 认证仅允许本机 127.0.0.1 HTTP，非本地访问必须使用 HTTPS。"})
+        if host not in self.allowed_hosts:
+            return send(403, {"message": "请使用配置的认证地址，或本机 127.0.0.1 地址。"})
+        if self.access_token and not hmac.compare_digest(request.headers.get("Authorization", "").encode(), f"Bearer {self.access_token}".encode()):
+            if request.method == "GET" and request.path_qs == "/":
+                gate = files("steam_family_watchdog_core").joinpath("login_access.html").read_text(encoding="utf-8")
+                return web.Response(text=gate, content_type="text/html", headers=HEADERS)
+            return send(403, {"message": "需要正确的管理密钥才能访问 Steam 认证页。"})
+        if request.headers.get("Origin") and request.headers["Origin"] not in self.allowed_origins:
+            return send(403, {"message": "请求来源无效。"})
+        if request.method == "GET" and request.path_qs in ("/", "/page"):
             return web.Response(text=self.page, content_type="text/html", headers=HEADERS)
         if (not hmac.compare_digest(request.headers.get("X-Login-CSRF", "").encode(), self.csrf.encode())
-                or request.headers.get("Origin", self.origin) != self.origin):
+                or request.headers.get("Origin", self.origin) not in self.allowed_origins):
             return send(403, {"message": "请求验证失败，请重新打开登录页面。"})
         if request.method == "GET" and request.path_qs == "/state":
             return send(200, self.state)
@@ -164,7 +195,7 @@ class LoginWeb:
         app.router.add_route("*", "/{path:.*}", self.handle)
 
         async def startup(app):
-            self.expiry_task = asyncio.create_task(self._stop_after(600))
+            self.expiry_task = asyncio.create_task(self._stop_after(self.lifetime))
 
         async def cleanup(app):
             await self._cancel_session()

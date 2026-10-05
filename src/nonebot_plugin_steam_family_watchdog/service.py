@@ -8,6 +8,8 @@ import asyncio
 import hashlib
 import json
 import time
+import sqlite3
+from contextlib import closing
 from typing import Callable
 
 from pydantic import BaseModel, Field
@@ -21,6 +23,8 @@ from steam_family_watchdog_core.util import iso_time, parse_time
 
 from .config import Config, EDITABLE_FIELDS, public_config
 from .messages import notification, superuser_ids
+from .access import address_message, page_urls, discover_public_ip
+from .login import LoginManager
 
 
 class AuthNotice(BaseModel):
@@ -33,11 +37,14 @@ class State(BaseModel):
     enabled: bool = False
     bot_id: str | None = None
     auth_notice: AuthNotice | None = None
+    pending_activation: bool = False
+    credential_retry_at: float = 0
 
 
 class Service:
     def __init__(self, config: Config, bots: Callable, superusers: Callable, log=print,
-                 store_factory=Store, auth_factory=SteamAuth, api_factory=SteamApi):
+                 store_factory=Store, auth_factory=SteamAuth, api_factory=SteamApi,
+                 login_manager_factory=LoginManager, public_ip_provider=discover_public_ip):
         self.base_config = config
         self.config = config
         self.bots, self.superusers, self.log = bots, superusers, log
@@ -55,6 +62,132 @@ class Service:
         self.next_scan = 0.0
         self.target_retries: dict[str, float] = {}
         self.lock = asyncio.Lock()
+        self.login_manager = login_manager_factory(self)
+        self.public_ip_provider = public_ip_provider
+        self.public_ip = config.steam_family_public_ip
+        self.web_running = False
+        self.credential_state = "not_logged_in"
+        self.credential_signature = ""
+        self.credential_checked_until = 0.0
+        self.last_monitor_status = {}
+
+    async def discover_addresses(self):
+        if self.public_ip or not self.config.steam_family_auto_public_ip:
+            return
+        if self.config.steam_family_login_public_url and self.config.steam_family_web_public_url:
+            return
+        try:
+            self.public_ip = await self.public_ip_provider()
+        except Exception:
+            self.log("Steam 家庭库：公网 IP 获取失败，本地地址仍可使用；可设置 PUBLIC_IP 或 PUBLIC_URL。")
+
+    def urls(self, kind: str) -> dict[str, str]:
+        c = self.config
+        host, port, override = (c.steam_family_login_host, c.steam_family_login_port, c.steam_family_login_public_url) if kind == "login" else (c.steam_family_web_host, c.steam_family_web_port, c.steam_family_web_public_url)
+        public = override or (page_urls(self.public_ip, port)["local"] if self.public_ip and kind != "login" else "")
+        return page_urls(host, port, public)
+
+    def _credential_fingerprint(self):
+        try:
+            contents = (self.root / "auth.json").read_bytes()
+        except OSError:
+            contents = b"missing-or-unreadable"
+        return hashlib.sha256(contents).hexdigest()
+
+    async def _probe_credentials(self):
+        auth = self.auth_factory(self.root)
+        try:
+            auth.load()
+            signature = self._credential_fingerprint()
+            if signature == self.credential_signature and time.time() < self.credential_checked_until:
+                return self.credential_state != "needs_login"
+            saved_pause = self._saved_rate_pause()
+            paused = max(self.state.credential_retry_at, saved_pause) > time.time() or (self.monitor and self.monitor.status["last_error"]
+                and self.monitor.status["last_error"]["code"] == "RATE_LIMIT" and self.monitor.initial_wait() > 0)
+            if paused:
+                self.credential_state = "temporarily_unavailable"
+                return True  # Locally valid, online validation deferred until the pause ends.
+            await auth.access()
+            self.credential_state = "authenticated"
+            self.credential_signature = self._credential_fingerprint()
+            self.credential_checked_until = time.time() + 300
+            if self.state.credential_retry_at or self.state.auth_notice is not None:
+                self.state.credential_retry_at = 0
+                self.state.auth_notice = None
+                self._save_state()
+            return True
+        except SteamError as error:
+            self.credential_signature = self._credential_fingerprint()
+            if error.code == "AUTH_REQUIRED":
+                self.credential_state = "needs_login"
+                self.credential_checked_until = time.time() + 300
+                return False
+            self.credential_state = "temporarily_unavailable"
+            self.state.credential_retry_at = time.time() + max(60, error.retry_after_seconds)
+            self._save_state()
+            self.log("Steam 凭据在线检查暂不可用，保留凭据并遵守重试等待。")
+            return True
+        finally:
+            await auth.close()
+
+    def _saved_rate_pause(self):
+        file = self.root / "monitor.sqlite3"
+        if not file.exists():
+            return 0.0
+        try:
+            with closing(sqlite3.connect(file.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+                values = dict(db.execute("SELECT key,value FROM meta WHERE key IN ('last_error','next_check_at')"))
+            error = json.loads(values.get("last_error", "null"))
+            return parse_time(values.get("next_check_at")) if error and error["code"] == "RATE_LIMIT" else 0.0
+        except (sqlite3.Error, ValueError, KeyError, TypeError):
+            return 0.0
+
+    async def _require_login(self):
+        self.credential_state = "needs_login"
+        self.credential_signature = self._credential_fingerprint()
+        self.credential_checked_until = time.time() + 300
+        await self._close_backend()
+        await self.login_manager.start()
+        self._record_auth_notice()
+
+    def login_information(self):
+        if self.login_manager.active:
+            urls = self.urls("login")
+            public = urls["public"] or "未配置 HTTPS 地址；公网 HTTP 禁止认证"
+            return f"Steam 认证页\n本地地址：{urls['local']}\n公网地址：{public}\n请使用 WEB_TOKEN 或数据目录 web-token.txt 中的管理密钥。"
+        return self.login_manager.error or "认证页未运行，可发送 steam认证 或 steam启动 检查并重新打开。"
+
+    async def request_login(self, bot=None):
+        async with self.lock:
+            if not self.started or self.closing:
+                return {"ok": False, "message": "插件尚未启动。"}
+            if self.login_manager.active:
+                return {"ok": True, "message": self.login_information()}
+            if await self._probe_credentials():
+                return {"ok": True, "message": "当前凭据本地有效；在线结果和重试状态可通过 steam状态 查看。"}
+            await self._require_login()
+            await self._notify_superusers(self.select_bot(bot))
+            return {"ok": self.login_manager.active, "message": self.login_information()}
+
+    async def authentication_finished(self):
+        async with self.lock:
+            if self.closing:
+                return
+            self.credential_state = "authenticated"
+            self.credential_signature = self._credential_fingerprint()
+            self.credential_checked_until = time.time() + 300
+            self.state.auth_notice = None
+            should_resume = self.state.enabled or self.state.pending_activation
+            check = await self.check()
+            if should_resume and check["ok"]:
+                self._open_backend()
+                self.state.activated = self.state.enabled = True
+                self.state.pending_activation = False
+                self.state.bot_id = check["bot_id"]
+                self.log("Steam 认证完成，监控已自动恢复。")
+            else:
+                self.log("Steam 认证完成；请使用 steam检查 确认配置后发送 steam启动。")
+            self._save_state()
 
     def core_config(self) -> CoreConfig:
         c = self.config
@@ -89,6 +222,8 @@ class Service:
                 self.started = True
                 if self.state.enabled:
                     self._open_backend()
+                if not await self._probe_credentials():
+                    await self._require_login()
             except Exception:
                 self.startup_error = "后端初始化失败，请检查运行配置、数据库权限或是否有其他实例占用数据目录。"
                 self.log(self.startup_error)
@@ -115,9 +250,11 @@ class Service:
         self.backend_release = release
         self.store, self.auth, self.api, self.monitor = store, auth, api, monitor
         self.next_scan = time.time() + monitor.initial_wait()
+        self.next_scan = max(self.next_scan, self.state.credential_retry_at)
 
     async def _close_backend(self):
         if self.monitor:
+            self.last_monitor_status = {**self.store.status(), **self.monitor.status}
             self.monitor.stop()
         try:
             if self.api:
@@ -136,6 +273,7 @@ class Service:
 
     async def shutdown(self):
         self.closing = True
+        await self.login_manager.close()
         async with self.lock:
             try:
                 await self._close_backend()
@@ -179,6 +317,9 @@ class Service:
         try:
             auth.load()
             auth_valid = True
+            if self.credential_state == "needs_login" and self._credential_fingerprint() == self.credential_signature:
+                auth_valid = False
+                errors.append("Steam 凭据已失效，需要完成认证页登录。")
         except SteamError as error:
             errors.append(str(error))
         except Exception:
@@ -187,6 +328,8 @@ class Service:
             await auth.close()
         if self.web_error:
             warnings.append(self.web_error)
+        if self.login_manager.error:
+            warnings.append(self.login_manager.error)
         if not self.state.activated:
             warnings.append("首次使用需要超级用户发送 steam启动。")
         return {"ok": not errors, "errors": errors, "warnings": warnings, "auth_valid": auth_valid,
@@ -203,14 +346,31 @@ class Service:
                     self.startup_error = None
                 except Exception:
                     pass
-            if not self.state.activated and not from_command:
+            if not self.state.activated and not self.state.pending_activation and not from_command:
                 return {"ok": False, "errors": ["首次启用必须由超级用户发送 steam启动。"]}
+            if not self.login_manager.active:
+                if not await self._probe_credentials():
+                    await self._require_login()
             check = await self.check(bot)
             if not check["ok"]:
                 if not check["auth_valid"]:
+                    if from_command and self.targets() and superuser_ids(self.superusers()) and self.select_bot(bot) and not self.startup_error:
+                        self.state.pending_activation = True
+                        self.state.bot_id = str(self.select_bot(bot).self_id)
+                        self._save_state()
+                    if not self.login_manager.active:
+                        await self._require_login()
                     self._record_auth_notice()
                     await self._notify_superusers(self.select_bot(bot))
+                    check["login_pending"] = True
+                    check["warnings"].append(self.login_information())
                 return check
+            if self.login_manager.active:
+                if from_command:
+                    self.state.pending_activation = True
+                    self.state.bot_id = check["bot_id"]
+                    self._save_state()
+                return {"ok": False, "errors": ["正在完成认证，请等待认证页关闭后自动恢复。"], "warnings": [self.login_information()]}
             if not self.monitor:
                 try:
                     self._open_backend()
@@ -219,6 +379,7 @@ class Service:
             previous = self.state.model_copy(deep=True)
             self.state.activated = True
             self.state.enabled = True
+            self.state.pending_activation = False
             self.state.bot_id = check["bot_id"]
             try:
                 self._save_state()
@@ -235,12 +396,14 @@ class Service:
                 raise ValueError("插件尚未启动或正在关闭")
             previous = self.state.enabled
             self.state.enabled = False
+            self.state.pending_activation = False
             try:
                 self._save_state()
             except Exception:
                 self.state.enabled = previous
                 raise
             await self._close_backend()
+            await self.login_manager.close()
             self.target_retries.clear()
             return {"ok": True, "enabled": False}
 
@@ -263,7 +426,7 @@ class Service:
         notice = self.state.auth_notice
         if not notice or not bot:
             return
-        message = "Steam 家庭库监控：长期登录凭据已失效、被撤销或不可用，需要重新登录。\n先发送 steam停止，再用 Python 版登录工具更新此数据目录的 auth.json，完成后发送 steam启动。"
+        message = "Steam 家庭库监控：凭据缺失或失效，需要登录。\n" + self.login_information()
         for id_ in superuser_ids(self.superusers(), bot.adapter.get_name()):
             if id_ in notice.sent_to:
                 continue
@@ -307,6 +470,23 @@ class Service:
             return
         async with self.lock:
             bot = self.select_bot(preferred_bot)
+            if self.login_manager.active or self.credential_state == "needs_login":
+                if not self.login_manager.active and self._credential_fingerprint() != self.credential_signature:
+                    if await self._probe_credentials():
+                        self.credential_state = "authenticated"
+                    else:
+                        await self._require_login()
+                if self.login_manager.active or self.credential_state == "needs_login":
+                    await self._notify_superusers(bot)
+                    return
+            if self.state.pending_activation and not self.state.enabled:
+                check = await self.check(bot)
+                if check["ok"]:
+                    self._open_backend()
+                    self.state.activated = self.state.enabled = True
+                    self.state.pending_activation = False
+                    self.state.bot_id = check["bot_id"]
+                    self._save_state()
             if not self.state.enabled or self.startup_error:
                 await self._notify_superusers(bot)
                 return
@@ -319,13 +499,13 @@ class Service:
                 self.next_scan = time.time() + seconds
                 error = self.monitor.status["last_error"]
                 if error and error["code"] == "AUTH_REQUIRED":
-                    self._record_auth_notice()
+                    await self._require_login()
+                    await self._notify_superusers(bot)
+                    return
                 elif not error and self.state.auth_notice is not None:
                     self.state.auth_notice = None
                     self._save_state()
                 self._sync_targets()
-            elif self.monitor.status["last_error"] and self.monitor.status["last_error"]["code"] == "AUTH_REQUIRED":
-                self._record_auth_notice()
             await self._notify_superusers(bot)
             await self._push(bot)
 
@@ -357,10 +537,13 @@ class Service:
             "bot_id": self.config.steam_family_bot_id or self.state.bot_id,
             "startup_error": self.startup_error, "web_error": self.web_error,
             "groups": len(self.config.steam_family_push_groups), "users": len(self.config.steam_family_push_users),
-            "auth_state": self.auth.state if self.auth else "stopped",
+            "auth_state": self.auth.state if self.auth else self.credential_state,
+            "pending_activation": self.state.pending_activation,
+            "login_running": self.login_manager.active, "login_urls": self.urls("login"),
+            "login_error": self.login_manager.error, "web_urls": self.urls("web"),
             "auth_notice_active": bool(self.state.auth_notice),
             "auth_notice_pending": bool(self.state.auth_notice and
                 set(superuser_ids(self.superusers())) - set(self.state.auth_notice.sent_to)),
-            **(self.store.status() if self.store else {}),
+            **(self.store.status() if self.store else self.last_monitor_status),
             **(self.monitor.status if self.monitor else {}),
         }

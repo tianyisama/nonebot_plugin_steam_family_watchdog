@@ -15,10 +15,11 @@ from nonebot_plugin_apscheduler import scheduler
 from .config import Config
 from .service import Service
 from .web import WebManager
+from .access import address_message
 
 __plugin_meta__ = PluginMetadata(
     name="Steam 家庭库监控", description="Steam 家庭库变化推送与轻量配置管理",
-    usage="超级用户：steam启动 / steam停止 / steam检查 / steam状态",
+    usage="超级用户：steam启动 / steam停止 / steam检查 / steam状态 / steam配置 / steam认证",
     homepage="https://github.com/tianyisama/nonebot_plugin_steam_family_watchdog",
     type="application", config=Config, supported_adapters={"~onebot.v11"},
 )
@@ -50,6 +51,7 @@ async def scheduled_pulse():
 
 @driver.on_startup
 async def startup():
+    await service.discover_addresses()
     await service.startup()
     await web_manager.start()
     scheduler.add_job(scheduled_pulse, "interval", seconds=5, id=JOB_ID,
@@ -80,6 +82,8 @@ activate = on_command("steam启动", aliases={"steam启用"}, permission=SUPERUS
 deactivate = on_command("steam停止", aliases={"steam停用"}, permission=SUPERUSER, priority=10, block=True)
 check_config = on_command("steam检查", permission=SUPERUSER, priority=10, block=True)
 show_status = on_command("steam状态", permission=SUPERUSER, priority=10, block=True)
+show_config_page = on_command("steam配置", aliases={"steam配置页"}, permission=SUPERUSER, priority=10, block=True)
+show_login_page = on_command("steam认证", aliases={"steam登录"}, permission=SUPERUSER, priority=10, block=True)
 
 
 def check_message(result):
@@ -128,4 +132,19 @@ async def status_handler():
     if error:
         lines.append(f"最近错误：{error['code']}，{error['message']}")
     lines.extend(item for item in (state["startup_error"], state["web_error"]) if item)
+    if state["login_running"]:
+        lines.append(service.login_information())
     await show_status.finish("\n".join(lines))
+
+
+@show_config_page.handle()
+async def config_page_handler():
+    if not service.web_running:
+        await show_config_page.finish(service.web_error or "配置页面未启动，请检查 WEB_ENABLED 设置。")
+    await show_config_page.finish(address_message("Steam 配置页面", service.urls("web")) + "\n密钥为 WEB_TOKEN 或数据目录 web-token.txt 的内容。")
+
+
+@show_login_page.handle()
+async def login_page_handler(bot: Bot):
+    result = await service.request_login(bot)
+    await show_login_page.finish(result["message"])
